@@ -2,3 +2,4 @@ data/*.csv
 venv/
 .idea/
 __pycache__/
+anaconda_projects/
