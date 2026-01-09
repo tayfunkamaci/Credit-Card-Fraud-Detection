@@ -1,84 +1,57 @@
+# 💳 Credit Card Fraud Detection: End-to-End Professional Pipeline
+
+Bu proje, Avrupa'daki kart sahiplerinin işlemlerinden oluşan veri seti üzerinde, veri sızıntısını (leakage) engelleyen ve iş odaklı eşik değer (threshold) optimizasyonu yapan profesyonel bir makine öğrenmesi çözümüdür.
+
 ## 📖 Detaylı Analiz Raporu
-Projenin tüm analiz adımlarına, grafiklerine ve detaylı kod açıklamalarına aşağıdaki notebook üzerinden ulaşabilirsiniz:
+Projenin tüm analiz adımlarına ve detaylı kod açıklamalarına notebook üzerinden ulaşabilirsiniz:
 👉 [Fraud Detection Report (Jupyter Notebook)](./notebooks/Fraud_Detection_Report.ipynb)
 
-💳 Credit Card Fraud Detection: End-to-End Professional Pipeline
-Bu proje, Avrupa'daki kart sahiplerinin transactions veri seti üzerinde, gerçek dünya bankacılık problemlerine yönelik geliştirilmiş bir makine öğrenmesi çözümüdür. Projenin temel odağı; veri sızıntısını (data leakage) engellemek, özellik mühendisliği (feature engineering) ile modelin görmediği desenleri yakalamak ve iş odaklı eşik değer (threshold) optimizasyonu yapmaktır.
+---
 
-📂 Veri Seti Hakkında (Reference)
-Bu çalışmada kullanılan veri seti, Kaggle üzerinde paylaşılan Credit Card Fraud Detection veri setidir.
+## 📂 Veri Seti Hakkında
+Bu çalışmada [Kaggle Credit Card Fraud Detection](https://www.kaggle.com/datasets/mlg-ulb/creditcardfraud) veri seti kullanılmıştır.
+- **İçerik:** Eylül 2013'teki Avrupa kart işlemleri.
+- **Dengesizlik:** İşlemlerin yalnızca **%0.17'si** dolandırıcılıktır.
 
-İçerik: Eylül 2013'te Avrupa'daki kart sahipleri tarafından yapılan işlemler.
+---
 
-Kısıtlamalar: Gizlilik nedeniyle veriler PCA (Temel Bileşenler Analizi) ile dönüştürülmüştür (V1-V28). Sadece 'Time' ve 'Amount' ham halde bırakılmıştır.
+## 🛠️ Teknik Süreç ve Metodoloji
 
-Zorluk: Veri seti aşırı dengesizdir (İşlemlerin yalnızca %0.17'si dolandırıcılıktır).
+### 1. Keşifçi Veri Analizi (EDA)
+Veri setindeki %0.17'lik fraud oranı, standart modeller için "Accuracy Paradox" yaratır. Bu dengesizliği aşağıdaki görsellerle analiz ettik:
 
-🛠️ Teknik Süreç ve Metodoloji
-1. Keşifçi Veri Analizi (EDA) ve Örnekleme
-Veri setindeki %0.17'lik fraud oranı, standart modellerin "her şeye normal" diyerek %99.8 başarı illüzyonuna kapılmasına neden olur.
+| Sınıf Dağılımı | Zamana Göre Yoğunluk |
+|---|---|
+| ![Sınıf Dağılımı](outputs/class_distribution.png) | ![Zaman](outputs/time_distribution.png) |
 
-![Sınıf Dağılımı](outputs/class_distribution.png) 
-grafiğinde görüldüğü üzere, aşırı dengesizlik SMOTE (Synthetic Minority Over-sampling Technique) kullanımını zorunlu kılmıştır.
+### 2. Özellik Mühendisliği (Feature Engineering)
+- **Amount_Log:** Harcama tutarlarındaki sapmaları normalleştirmek için kullanıldı.
+- **Time_Diff:** İşlemler arası saniye farkı ile "hızlı işlem" kontrolü yapıldı.
+- **PCA Stats:** V1-V28 bileşenlerinin merkezi eğilimleri türetildi.
 
-![Zaman](outputs/time_distribution.png) grafiği ile işlemlerin gün içindeki yoğunlukları incelenmiş, dolandırıcıların tercih ettiği "ölü saatler" için Is_Night değişkeni üretilmiştir.
+### 3. Sızıntısız Model Hattı (Pipeline)
+Veri sızıntısını önlemek için `imblearn.pipeline` kullanılarak Scaling ve SMOTE işlemleri sadece eğitim katmanlarına uygulanmıştır.
 
-2. Özellik Mühendisliği (Neyi, Neden Yaptık?)
-Sadece ham veriyi modele vermek yerine, bankacılık tecrübesine dayalı yeni metrikler türetilmiştir:
 
-Time_Diff (Velocity Check): Bir işlem ile bir önceki işlem arasındaki saniye farkı. Çok kısa sürede yapılan çok sayıda işlem yüksek risk taşır.
 
-Amount_Log: Harcama tutarlarındaki aşırı uç değerleri (skewness) normalleştirmek için Log dönüşümü uygulanmıştır.
+[Image of machine learning pipeline diagram]
 
-PCA Stats (PCA_Abs_Mean, vb.): V1-V28 arasındaki bileşenlerin genel şiddeti hesaplanarak, dolandırıcılık vakalarındaki "sıradışı sapmalar" tek bir değişkende özetlenmiştir.
 
-3. Veri Sızıntısını Önleyen Pipeline Yapısı
-Projenin en kritik teknik başarısı imblearn.pipeline kullanımıdır.
+---
 
-Hata: Eğer SMOTE veya Scaling işlemini train_test_split yapmadan önce tüm veriye uygularsanız, test verisindeki bilgiler eğitim verisine "sızar" ve sonuçlar yalancı bir %100 çıkar.
+## 📈 Final Performans Sonuçları
+Modelimiz dolandırıcılığı kaçırmamak adına **Recall** odaklı optimize edilmiştir. **0.05 Eşik Değeri** ile elde edilen sonuçlar:
 
-Çözüm: Pipeline kullanarak, ölçeklendirme ve SMOTE işlemlerinin sadece Cross-Validation sırasında, o anki eğitim katmanına uygulanması sağlanmıştır.
+![Confusion Matrix](outputs/final_confusion_matrix.png)
 
-Python
+- **Doğru Yakalanan Fraud:** 96
+- **Gözden Kaçan Fraud (FN):** 2
+- **Yakalama Oranı (Recall):** ~%98
 
-# Profesyonel Pipeline Mimari
-return ImbPipeline([
-    ('scaler', StandardScaler()),
-    ('smote', SMOTE(random_state=42)),
-    ('classifier', voting_clf)
-])
-4. Hibrit Modelleme (Voting Classifier)
-Tek bir model yerine; XGBoost, LightGBM ve Random Forest algoritmaları "Soft Voting" yöntemiyle birleştirilmiştir. Bu, modelin genelleme yeteneğini artırır ve varyansı düşürür.
+---
 
-5. İş Odaklı Eşik Değer (Threshold) Optimizasyonu
-Bankacılıkta 1 dolandırıcılığı kaçırmanın maliyeti, 10 tane yanlış alarmdan çok daha yüksektir. Bu yüzden modelin karar verme eşiği varsayılan 0.50'den 0.05'e çekilmiştir.
-
-📈 Final Performans Sonuçları
-Model, dolandırıcılık vakalarını yakalama (Recall) konusunda optimize edilmiştir.
-
-Toplam Yakalanan Fraud: 96
-
-Gözden Kaçan (False Negative): Sadece 2!
-
-Recall Skoru: ~%98
-
-Sonuç: Bu model, bankanın finansal kaybını minimize ederken, operasyonel olarak yönetilebilir bir hatalı alarm oranı sunmaktadır.
-
-💻 Kurulum
-Veriyi data/ klasörüne indirin.
-
-Kütüphaneleri yükleyin: pip install -r requirements.txt
-
-Çalıştırın: python src/main.py
-
-## 📚 Kaynakça ve Veri Seti Atfı
-Bu projede kullanılan veriler, makine öğrenmesi topluluğu tarafından dolandırıcılık tespiti (fraud detection) çalışmalarında standart bir referans olarak kabul edilmektedir.
-
-**Veri Seti Sahibi:**
-Worldline and the Machine Learning Group (MLG) of ULB (Université Libre de Bruxelles).
-
-**Resmi Atıf:**
-> Andrea Dal Pozzolo, Olivier Caelen, Reid A. Johnson and Gianluca Bontempi. **Calibrating Probability with Undersampling for Unbalanced Classification.** In *Symposium on Computational Intelligence and Data Mining (CIDM)*, IEEE, 2015.
-
-**Erişim:**
-Veri setine [Kaggle Credit Card Fraud Detection](https://www.kaggle.com/datasets/mlg-ulb/creditcardfraud) adresi üzerinden ulaşılabilir.
+## 💻 Kurulum ve Çalıştırma
+1. Veriyi `data/` klasörüne yerleştirin.
+2. Kütüphaneleri kurun:
+```bash
+pip install -r requirements.txt
