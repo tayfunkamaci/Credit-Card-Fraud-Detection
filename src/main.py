@@ -12,76 +12,59 @@ from imblearn.over_sampling import SMOTE
 from imblearn.pipeline import Pipeline as ImbPipeline
 import warnings
 import os
+import joblib
 
 # 1. AYARLAR VE DİNAMİK DOSYA YOLLARI
 warnings.filterwarnings("ignore")
 pd.set_option('display.max_columns', None)
-pd.set_option('display.width', 300)
 
-# Dosya yollarını otomatik ayarla (src içinde çalışsa bile ana dizini bulur)
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_PATH = os.path.join(BASE_DIR, 'data', 'creditcard.csv')
 OUTPUT_DIR = os.path.join(BASE_DIR, 'outputs')
+MODEL_DIR = os.path.join(BASE_DIR, 'models')
 
-# Çıktı klasörü yoksa oluştur
-if not os.path.exists(OUTPUT_DIR):
-    os.makedirs(OUTPUT_DIR)
-
-
-#################################################################################
-# 2. ANALİZ VE GÖRSELLEŞTİRME (EDA)
-#################################################################################
-
-def perform_eda(df):
-    print("Analiz grafikleri 'outputs/' klasörüne kaydediliyor...")
-
-    # Sınıf Dağılımı
-    plt.figure(figsize=(6, 6))
-    df['Class'].value_counts().plot.pie(autopct='%1.1f%%', colors=['#66b3ff', '#ff6666'], labels=['Normal', 'Fraud'])
-    plt.title("İşlem Sınıf Dağılımı")
-    plt.savefig(os.path.join(OUTPUT_DIR, 'class_distribution.png'))
-    plt.close()
-
-    # Korelasyon Heatmap
-    plt.figure(figsize=(12, 8))
-    sns.heatmap(df.corr(), cmap="coolwarm", annot=False)
-    plt.title("Özellik Korelasyon Matrisi")
-    plt.savefig(os.path.join(OUTPUT_DIR, 'correlation_heatmap.png'))
-    plt.close()
-
-    # Zaman Dağılımı
-    plt.figure(figsize=(10, 5))
-    sns.histplot(df['Time'], bins=50, kde=True, color='teal')
-    plt.title("Zamana Göre İşlem Yoğunluğu")
-    plt.savefig(os.path.join(OUTPUT_DIR, 'time_distribution.png'))
-    plt.close()
+if not os.path.exists(OUTPUT_DIR): os.makedirs(OUTPUT_DIR)
+if not os.path.exists(MODEL_DIR): os.makedirs(MODEL_DIR)
 
 
 #################################################################################
-# 3. ÖZELLİK MÜHENDİSLİĞİ VE MODELLEME
+# 2. GELİŞMİŞ ÖZELLİK MÜHENDİSLİĞİ
 #################################################################################
 
 def create_features_advanced(dataframe):
+    """
+    Önemli: Bu fonksiyon veri karıştırılmadan (shuffle) ve
+    zaman sırası bozulmadan önce çalıştırılmalıdır.
+    """
     df_copy = dataframe.copy()
 
-    # Yeni Özellikler
+    # 1. Temel Dönüşümler
     df_copy['Amount_Log'] = np.log1p(df_copy['Amount'])
+
+    # Zaman farkı (Time_Diff): Gerçek zamanlı ardışık işlem hızı
     df_copy['Time_Diff'] = df_copy['Time'].diff().fillna(0)
+
+    # Saat ve Gece Değişkeni
     df_copy['Hour'] = (df_copy['Time'] // 3600) % 24
     df_copy['Is_Night'] = df_copy['Hour'].apply(lambda x: 1 if (x < 6 or x >= 22) else 0)
 
-    # PCA İstatistikleri (V1-V28)
+    # 2. Gelişmiş PCA İstatistikleri (V1-V28)
     pca_cols = [col for col in df_copy.columns if col.startswith('V')]
     df_copy['PCA_Abs_Mean'] = df_copy[pca_cols].abs().mean(axis=1)
     df_copy['PCA_Pos_Sum'] = df_copy[pca_cols].apply(lambda x: x[x > 0].sum(), axis=1)
     df_copy['PCA_Neg_Sum'] = df_copy[pca_cols].apply(lambda x: x[x < 0].sum(), axis=1)
 
+    # Ham verileri düşürüyoruz
     df_copy.drop(['Time', 'Amount'], axis=1, inplace=True)
     return df_copy
 
 
+#################################################################################
+# 3. MODEL MİMARİSİ (VOTING PIPELINE)
+#################################################################################
+
 def get_voting_pipeline():
-    # Güçlü modellerin birleşimi
+    # Zayıf yönleri birbirini dengeleyen 3 güçlü model
     xgb = XGBClassifier(eval_metric="logloss", random_state=17)
     lgbm = LGBMClassifier(random_state=17, verbosity=-1)
     rf = RandomForestClassifier(random_state=17, max_depth=5)
@@ -91,65 +74,73 @@ def get_voting_pipeline():
         voting='soft'
     )
 
-    # Veri Sızıntısını Önleyen Pipeline
-    return ImbPipeline([
+    # Sızıntısız İşlem Hattı
+    pipeline = ImbPipeline([
         ('scaler', StandardScaler()),
-        ('smote', SMOTE(random_state=42)),
+        ('smote', SMOTE(random_state=17)),
         ('classifier', voting_clf)
     ])
+    return pipeline
 
 
 #################################################################################
-# 4. ANA ÇALIŞTIRMA BLOĞU
+# 4. ANA ÇALIŞTIRICI (MAIN)
 #################################################################################
+
+def main():
+    # 1. Veri Yükleme ve Sıralama
+    if not os.path.exists(DATA_PATH):
+        print(f"Hata: Veri dosyası bulunamadı! Yol: {DATA_PATH}")
+        return
+
+    print("Veri yükleniyor ve zaman sırasına göre diziliyor...")
+    df = pd.read_csv(DATA_PATH)
+    df = df.sort_values('Time')  # Zaman farkı analizi için KRİTİK ADIM
+
+    # 2. Özellik Mühendisliği (TÜM VERİ ÜZERİNDE)
+    print("Özellik mühendisliği uygulanıyor...")
+    df_processed = create_features_advanced(df)
+
+    # 3. Veri Örnekleme (Opsiyonel - Hız için 100k normal işlem alıyoruz)
+    # NOT: Özellikler hesaplandıktan sonra örnekleme yapıyoruz!
+    fraud = df_processed[df_processed['Class'] == 1]
+    non_fraud = df_processed[df_processed['Class'] == 0].sample(n=100000, random_state=17)
+    df_final = pd.concat([fraud, non_fraud]).sample(frac=1, random_state=17)
+
+    X = df_final.drop('Class', axis=1)
+    y = df_final['Class']
+
+    # 4. Eğitim ve Test Ayrımı
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.20, random_state=17, stratify=y)
+
+    # 5. Eğitim
+    print(f"Model eğitiliyor (Veri Boyutu: {df_final.shape})...")
+    pipeline = get_voting_pipeline()
+    pipeline.fit(X_train, y_train)
+
+    # 6. Tahmin ve Threshold (Eşik Değer) Optimizasyonu
+    y_proba = pipeline.predict_proba(X_test)[:, 1]
+    threshold = 0.05
+    y_pred = (y_proba >= threshold).astype(int)
+
+    # 7. Raporlama
+    print(f"\n=== PERFORMANS RAPORU (Threshold: {threshold}) ===")
+    print(classification_report(y_test, y_pred))
+
+    # 8. Çıktıları ve Modeli Kaydetme
+    print("\nGrafikler ve model dosyası kaydediliyor...")
+
+    # Confusion Matrix
+    plt.figure(figsize=(8, 6))
+    sns.heatmap(confusion_matrix(y_test, y_pred), annot=True, fmt='d', cmap='Blues')
+    plt.title(f'Final Confusion Matrix (Recall Optimized - Threshold: {threshold})')
+    plt.savefig(os.path.join(OUTPUT_DIR, 'final_confusion_matrix.png'))
+
+    # Modeli Streamlit için kaydet
+    joblib.dump(pipeline, os.path.join(MODEL_DIR, 'fraud_model.pkl'))
+
+    print(f"Başarılı! Çıktılar '{OUTPUT_DIR}' klasöründe, model '{MODEL_DIR}' içinde.")
+
 
 if __name__ == "__main__":
-    # 1. Veri Yükleme
-    if not os.path.exists(DATA_PATH):
-        print(f"HATA: {DATA_PATH} bulunamadı! Lütfen veriyi 'data' klasörüne koyun.")
-    else:
-        print("Veri yükleniyor...")
-        df = pd.read_csv(DATA_PATH)
-
-        # 2. Analiz
-        perform_eda(df)
-
-        # 3. Örnekleme (Veriyi hızlandırmak için)
-        fraud = df[df['Class'] == 1]
-        non_fraud = df[df['Class'] == 0].sample(frac=0.2, random_state=17)
-        df_sampled = pd.concat([fraud, non_fraud]).sample(frac=1, random_state=17)
-
-        # 4. Özellik Mühendisliği
-        df_final = create_features_advanced(df_sampled)
-        X = df_final.drop('Class', axis=1)
-        y = df_final['Class']
-
-        # 5. Veriyi Bölme
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.20, random_state=17, stratify=y)
-
-        # 6. Eğitim
-        print("Model eğitiliyor (Bu işlem biraz sürebilir)...")
-        pipeline = get_voting_pipeline()
-        pipeline.fit(X_train, y_train)
-
-        # 7. Tahmin ve Eşik Değer (Threshold) Optimizasyonu
-        print("Sonuçlar değerlendiriliyor...")
-        y_proba = pipeline.predict_proba(X_test)[:, 1]
-
-        # Bankacılık standartları için %5 eşiği (Recall odaklı)
-        threshold = 0.05
-        y_pred = (y_proba >= threshold).astype(int)
-
-        # 8. Raporlama
-        print(f"\n=== PERFORMANS RAPORU (Threshold: {threshold}) ===")
-        print(classification_report(y_test, y_pred))
-
-        # 9. Confusion Matrix Kaydetme
-        plt.figure(figsize=(6, 4))
-        sns.heatmap(confusion_matrix(y_test, y_pred), annot=True, fmt='d', cmap='Blues')
-        plt.title(f"Final Confusion Matrix (Threshold: {threshold})")
-        plt.xlabel("Tahmin Edilen")
-        plt.ylabel("Gerçek Sınıf")
-        plt.savefig(os.path.join(OUTPUT_DIR, 'final_confusion_matrix.png'))
-
-        print(f"\nTüm işlem tamam! Çıktılar şurada: {OUTPUT_DIR}")
+    main()
