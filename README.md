@@ -75,6 +75,10 @@ Precision değerinin düşük olması bilinçli bir **mühendislik tercihidir.**
 3. Modeli eğitin ve sonuçları görün:
     ```bash
    python src/main.py
+   
+4. Arayüzü başlatın (Opsiyonel):
+   ```bash
+   streamlit run app.py
 
 ---
 
