@@ -2,149 +2,226 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestClassifier, VotingClassifier
-from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import classification_report, confusion_matrix
-from xgboost import XGBClassifier
-from lightgbm import LGBMClassifier
-from imblearn.over_sampling import SMOTE
-from imblearn.pipeline import Pipeline as ImbPipeline
 import warnings
 import os
 import joblib
 
-# 1. AYARLAR VE DİNAMİK DOSYA YOLLARI
+from sklearn.ensemble import RandomForestClassifier, VotingClassifier
+from sklearn.metrics import classification_report, confusion_matrix
+from xgboost import XGBClassifier
+from lightgbm import LGBMClassifier
+
 warnings.filterwarnings("ignore")
 pd.set_option('display.max_columns', None)
 
+#################################################################################
+# 1. DOSYA YOLLARI
+#################################################################################
+
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA_PATH = os.path.join(BASE_DIR, 'data', 'creditcard.csv')
-OUTPUT_DIR = os.path.join(BASE_DIR, 'outputs')
-MODEL_DIR = os.path.join(BASE_DIR, 'models')
+DATA_PATH = os.path.join(BASE_DIR, "data", "creditcard.csv")
+OUTPUT_DIR = os.path.join(BASE_DIR, "outputs")
+MODEL_DIR = os.path.join(BASE_DIR, "models")
 
-if not os.path.exists(OUTPUT_DIR): os.makedirs(OUTPUT_DIR)
-if not os.path.exists(MODEL_DIR): os.makedirs(MODEL_DIR)
-
-
-#################################################################################
-# 2. GELİŞMİŞ ÖZELLİK MÜHENDİSLİĞİ
-#################################################################################
-
-def create_features_advanced(dataframe):
-    """
-    Önemli: Bu fonksiyon veri karıştırılmadan (shuffle) ve
-    zaman sırası bozulmadan önce çalıştırılmalıdır.
-    """
-    df_copy = dataframe.copy()
-
-    # 1. Temel Dönüşümler
-    df_copy['Amount_Log'] = np.log1p(df_copy['Amount'])
-
-    # Zaman farkı (Time_Diff): Gerçek zamanlı ardışık işlem hızı
-    df_copy['Time_Diff'] = df_copy['Time'].diff().fillna(0)
-
-    # Saat ve Gece Değişkeni
-    df_copy['Hour'] = (df_copy['Time'] // 3600) % 24
-    df_copy['Is_Night'] = df_copy['Hour'].apply(lambda x: 1 if (x < 6 or x >= 22) else 0)
-
-    # 2. Gelişmiş PCA İstatistikleri (V1-V28)
-    pca_cols = [col for col in df_copy.columns if col.startswith('V')]
-    df_copy['PCA_Abs_Mean'] = df_copy[pca_cols].abs().mean(axis=1)
-    df_copy['PCA_Pos_Sum'] = df_copy[pca_cols].apply(lambda x: x[x > 0].sum(), axis=1)
-    df_copy['PCA_Neg_Sum'] = df_copy[pca_cols].apply(lambda x: x[x < 0].sum(), axis=1)
-
-    # Ham verileri düşürüyoruz
-    df_copy.drop(['Time', 'Amount'], axis=1, inplace=True)
-    return df_copy
-
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+os.makedirs(MODEL_DIR, exist_ok=True)
 
 #################################################################################
-# 3. MODEL MİMARİSİ (VOTING PIPELINE)
+# 2. FEATURE ENGINEERING (TIME-AWARE)
 #################################################################################
 
-def get_voting_pipeline():
-    # Zayıf yönleri birbirini dengeleyen 3 güçlü model
-    xgb = XGBClassifier(eval_metric="logloss", random_state=17)
-    lgbm = LGBMClassifier(random_state=17, verbosity=-1)
-    rf = RandomForestClassifier(random_state=17, max_depth=5)
+def create_features(df):
+    df = df.copy()
 
-    voting_clf = VotingClassifier(
-        estimators=[('xgb', xgb), ('lgbm', lgbm), ('rf', rf)],
-        voting='soft'
+    df["Amount_Log"] = np.log1p(df["Amount"])
+    df["Time_Diff"] = df["Time"].diff().fillna(0)
+
+    df["Hour"] = (df["Time"] // 3600) % 24
+    df["Is_Night"] = df["Hour"].apply(lambda x: 1 if (x < 6 or x >= 22) else 0)
+
+    pca_cols = [c for c in df.columns if c.startswith("V")]
+    df["PCA_Abs_Mean"] = df[pca_cols].abs().mean(axis=1)
+    df["PCA_Pos_Sum"] = df[pca_cols].clip(lower=0).sum(axis=1)
+    df["PCA_Neg_Sum"] = df[pca_cols].clip(upper=0).sum(axis=1)
+
+    df.drop(["Time", "Amount"], axis=1, inplace=True)
+    return df
+
+#################################################################################
+# 3. MODEL OLUŞTURMA (CLASS WEIGHT)
+#################################################################################
+
+def get_model(y_train):
+
+    scale_pos = (y_train == 0).sum() / (y_train == 1).sum()
+
+    xgb = XGBClassifier(
+        eval_metric="logloss",
+        scale_pos_weight=scale_pos,
+        random_state=17
     )
 
-    # Sızıntısız İşlem Hattı
-    pipeline = ImbPipeline([
-        ('scaler', StandardScaler()),
-        ('smote', SMOTE(random_state=17)),
-        ('classifier', voting_clf)
-    ])
-    return pipeline
+    lgbm = LGBMClassifier(
+        class_weight="balanced",
+        random_state=17,
+        verbosity=-1
+    )
 
+    rf = RandomForestClassifier(
+        class_weight="balanced",
+        random_state=17,
+        max_depth=6,
+        n_estimators=200
+    )
+
+    voting = VotingClassifier(
+        estimators=[
+            ("xgb", xgb),
+            ("lgbm", lgbm),
+            ("rf", rf)
+        ],
+        voting="soft"
+    )
+
+    return voting
 
 #################################################################################
-# 4. ANA ÇALIŞTIRICI (MAIN)
+# 4. MAIN
 #################################################################################
 
 def main():
-    # 1. Veri Yükleme ve Sıralama
+
     if not os.path.exists(DATA_PATH):
-        print(f"Hata: Veri dosyası bulunamadı! Yol: {DATA_PATH}")
+        print("Veri seti bulunamadı.")
         return
 
-    print("Veri yükleniyor ve zaman sırasına göre diziliyor...")
+    print("Veri yükleniyor...")
     df = pd.read_csv(DATA_PATH)
-    df = df.sort_values('Time')  # Zaman farkı analizi için KRİTİK ADIM
 
-    # 2. Özellik Mühendisliği (TÜM VERİ ÜZERİNDE)
-    print("Özellik mühendisliği uygulanıyor...")
-    df_processed = create_features_advanced(df)
+    print("Zamana göre sıralanıyor...")
+    df = df.sort_values("Time").reset_index(drop=True)
 
-    # 3. Veri Örnekleme (Opsiyonel - Hız için 100k normal işlem alıyoruz)
-    # NOT: Özellikler hesaplandıktan sonra örnekleme yapıyoruz!
-    #fraud = df_processed[df_processed['Class'] == 1]
-    #non_fraud = df_processed[df_processed['Class'] == 0].sample(n=100000, random_state=17)
-    #df_final = pd.concat([fraud, non_fraud]).sample(frac=1, random_state=17)
+    #############################################################################
+    # TIME-BASED SPLIT
+    #############################################################################
 
-    # Tüm veriyi kullanıyoruz, örnekleme yok!
-    print("Tüm veri seti kullanılıyor (Sampling devre dışı)...")
-    df_final = df_processed.copy()
+    split_idx = int(len(df) * 0.8)
 
-    X = df_final.drop('Class', axis=1)
-    y = df_final['Class']
+    df_train = df.iloc[:split_idx]
+    df_test  = df.iloc[split_idx:]
 
-    # 4. Eğitim ve Test Ayrımı
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.20, random_state=17, stratify=y)
+    #############################################################################
+    # FEATURE ENGINEERING (AYRI AYRI)
+    #############################################################################
 
-    # 5. Eğitim
-    print(f"Model eğitiliyor (Veri Boyutu: {df_final.shape})...")
-    pipeline = get_voting_pipeline()
-    pipeline.fit(X_train, y_train)
+    print("Feature engineering (train)...")
+    train_fe = create_features(df_train)
 
-    # 6. Tahmin ve Threshold (Eşik Değer) Optimizasyonu
-    y_proba = pipeline.predict_proba(X_test)[:, 1]
-    threshold = 0.05
-    y_pred = (y_proba >= threshold).astype(int)
+    print("Feature engineering (test)...")
+    test_fe = create_features(df_test)
 
-    # 7. Raporlama
-    print(f"\n=== PERFORMANS RAPORU (Threshold: {threshold}) ===")
-    print(classification_report(y_test, y_pred))
+    X_train = train_fe.drop("Class", axis=1)
+    y_train = train_fe["Class"]
 
-    # 8. Çıktıları ve Modeli Kaydetme
-    print("\nGrafikler ve model dosyası kaydediliyor...")
+    X_test = test_fe.drop("Class", axis=1)
+    y_test = test_fe["Class"]
 
-    # Confusion Matrix
+    #############################################################################
+    # MODEL EĞİTİMİ
+    #############################################################################
+
+    print("Model eğitiliyor...")
+    model = get_model(y_train)
+    model.fit(X_train, y_train)
+
+    #############################################################################
+    # TAHMİN OLASILIKLARI
+    #############################################################################
+
+    y_proba = model.predict_proba(X_test)[:, 1]
+
+    #############################################################################
+    # COST-BASED THRESHOLD OPTIMIZATION
+    #############################################################################
+
+    FP_COST = 10      # ₺
+    FN_COST = 1000    # ₺
+
+    thresholds = np.arange(0.01, 0.99, 0.01)
+
+    total_costs = []
+    fp_list = []
+    fn_list = []
+
+    for t in thresholds:
+        y_pred_temp = (y_proba >= t).astype(int)
+        tn, fp, fn, tp = confusion_matrix(y_test, y_pred_temp).ravel()
+
+        cost = fp * FP_COST + fn * FN_COST
+
+        total_costs.append(cost)
+        fp_list.append(fp)
+        fn_list.append(fn)
+
+    best_idx = np.argmin(total_costs)
+    best_threshold = thresholds[best_idx]
+    best_cost = total_costs[best_idx]
+
+    print(f"\nEn düşük maliyetli threshold: {best_threshold:.2f}")
+    print(f"Toplam maliyet: {best_cost:,.0f} ₺")
+
+    #############################################################################
+    # COST CURVE GRAFİĞİ
+    #############################################################################
+
+    plt.figure(figsize=(10, 6))
+    plt.plot(thresholds, total_costs, label="Toplam Maliyet (₺)")
+    plt.axvline(best_threshold, color="red", linestyle="--",
+                label=f"Best Threshold = {best_threshold:.2f}")
+    plt.xlabel("Threshold")
+    plt.ylabel("Toplam Maliyet (₺)")
+    plt.title("Cost-Based Threshold Optimization")
+    plt.legend()
+    plt.grid(True)
+    plt.savefig(os.path.join(OUTPUT_DIR, "cost_curve.png"))
+    plt.close()
+
+    #############################################################################
+    # FİNAL DEĞERLENDİRME
+    #############################################################################
+
+    y_pred_final = (y_proba >= best_threshold).astype(int)
+
+    print("\n=== CLASSIFICATION REPORT (COST-BASED) ===")
+    print(classification_report(y_test, y_pred_final))
+
+    cm = confusion_matrix(y_test, y_pred_final)
+
     plt.figure(figsize=(8, 6))
-    sns.heatmap(confusion_matrix(y_test, y_pred), annot=True, fmt='d', cmap='Blues')
-    plt.title(f'Final Confusion Matrix (Recall Optimized - Threshold: {threshold})')
-    plt.savefig(os.path.join(OUTPUT_DIR, 'final_confusion_matrix.png'))
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues")
+    plt.title(f"Confusion Matrix (Threshold={best_threshold:.2f})")
+    plt.xlabel("Predicted")
+    plt.ylabel("Actual")
+    plt.savefig(os.path.join(OUTPUT_DIR, "confusion_matrix.png"))
+    plt.close()
 
-    # Modeli Streamlit için kaydet
-    joblib.dump(pipeline, os.path.join(MODEL_DIR, 'fraud_model.pkl'))
+    #############################################################################
+    # MODEL + METADATA KAYDI
+    #############################################################################
 
-    print(f"Başarılı! Çıktılar '{OUTPUT_DIR}' klasöründe, model '{MODEL_DIR}' içinde.")
+    model_package = {
+        "model": model,
+        "threshold": best_threshold,
+        "features": X_train.columns.tolist(),
+        "fp_cost": FP_COST,
+        "fn_cost": FN_COST
+    }
 
+    joblib.dump(model_package, os.path.join(MODEL_DIR, "fraud_model.pkl"))
+
+    print("\nModel ve çıktılar başarıyla kaydedildi.")
+
+#################################################################################
 
 if __name__ == "__main__":
     main()
